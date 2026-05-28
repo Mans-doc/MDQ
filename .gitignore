@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+outputs/
+*.parquet
+*.docx
+*.pdf
+qa_text.txt
+extract_docx.py
+investigate_rate.py
+initial_eda.py
+manual_audit.py
