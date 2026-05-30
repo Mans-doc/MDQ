@@ -101,4 +101,4 @@ All outputs are saved to `reports/`.
 
 ## Team
 
-Mastercard Data Quest 2026 — AIESEC Kazakhstan
+FourSight - Mastercard Data Quest 2026 — AIESEC Kazakhstan
