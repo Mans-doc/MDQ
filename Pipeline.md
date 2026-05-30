@@ -1,185 +1,207 @@
-## Стек и инструменты
+# Pipeline Documentation
 
-* Язык и окружение
-  * Python 3.10+ в ноутбуке (Jupyter / VS Code / Colab).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * Управление зависимостями: poetry / pip + requirements.txt (важно для reproducibility).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Основные библиотеки
-  * pandas, numpy — подготовка и агрегации по картам/клиентам.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * pyarrow / fastparquet — чтение .parquet файлов с транзакциями и мерчантами.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * scikit-learn — train/test split, baseline‑модели (LogisticRegression, RandomForest, GradientBoosting, Pipeline, StandardScaler).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * lightgbm или xgboost — бустинг по табличным фичам (скорость + качество).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * matplotlib, seaborn — EDA и визуализации для презентации.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * shap — интерпретация важности признаков и объяснимость.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Инфраструктура/инструменты вокруг
-  * GitHub/GitLab repo с кодом и инструкцией запуска (для Reproducibility).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-  * Makefile или простой run.sh / README с командами запуска.
+Full description of the ML pipeline in `solution.py`.
 
-## Общий план решения
+---
 
-1. Понять единицу предсказания
-   * Скорее всего, хотим классифицировать не транзакции, а клиентов‑физлиц (или карты) на «скрытый предприниматель / обычный потребитель».[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Решение: агрегировать транзакции на уровень card_number или клиента (если есть customer_id; если нет — работаем на уровне карты).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-2. Получить/сконструировать таргет
-   * Одна из логичных стратегий:
-     * Использовать поведение business cardholders как позитивный «эталон» бизнес‑поведения.
-     * Сформировать таргет:
-       * business_cards → y=1 (бизнес‑поведение),
-       * consumer_cards → y=0 (потребительское поведение).
-   * После обучения использовать модель, чтобы выявить среди consumer_cards тех, кто по поведению похож на бизнес.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-3. EDA
-   * Посмотреть распределения по сегментам (business vs consumer):
-     * Кол-во транзакций на карту.
-     * Средний чек, медианный чек, доля входящих/исходящих (если можно различить по признакам/знаку).
-     * Распределения по MCC, merchant_id, странам и каналам (online/offline).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-     * Тайм‑паттерны: по часам суток, дням недели, сезонность (октябрь–март).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Цель: увидеть фичи, которые хорошо разделяют сегменты.
-4. Фичеинжиниринг (на уровне карты/клиента)
-   * Считаем агрегаты по consumer + business, чтобы модель училась на обоих.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Список фич — см. раздел ниже.
-5. Построение baseline‑моделей
-   * Начать с LogisticRegression / RandomForest как интерпретируемого baseline.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Метрики:
-     * ROC‑AUC, PR‑AUC, accuracy.
-     * Обязательно confusion matrix (precision, recall, F1) по условному cut‑off (например, выбранному по максимизации F1 или заданию recall).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-6. Улучшение модели
-   * Попробовать LightGBM/XGBoost с простым подбором гиперпараметров (RandomizedSearchCV / Optuna).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Добавить более сложные фичи (MCC‑профиль, концентрации, регулярность).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Сравнить метрики vs baseline и зафиксировать лучший вариант.
-7. Интерпретация и бизнес‑порог
-   * Использовать SHAP/feature_importances_, чтобы объяснить, какие паттерны сильнее всего связаны с бизнес‑поведением.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Подобрать порог вероятности p* для флага «скрытый предприниматель»:
-     * Можно оптимизировать под high‑precision (чтобы не раздражать обычных клиентов лишними предложениями) или под high‑recall (чтобы не упускать бизнес).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-8. Применение модели к consumer‑сегменту
-   * Обучаем модель на смешанном датасете (business + consumer, с таргетом 1/0).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Считаем для всех consumer‑карт p(business‑like) и сортируем по вероятности.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-   * Анализируем топ‑N кандидатов:
-     * Профиль MCC, регулярность платежей, география.
-     * Формируем сегмент для маркетинга/продаж и описываем бизнес‑кейс.
-9. Финализация
-   * Оформляем код в виде:
-     * 1. data_prep.py/notebook, 2) feature_engineering.py/notebook, 3) modeling.py, 4) evaluation_report.ipynb.
-   * Делаем презентацию: проблема → данные → фичи → модель → результаты → бизнес‑кейсы и рекомендации.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+## Overview
 
-## Идеи фич для карты/клиента
+```
+Raw Parquet Files
+      │
+      ▼
+ STEP 1: Data Loading          load_data()
+      │
+      ▼
+ STEP 2: Preprocessing         preprocess()
+      │
+      ▼
+ STEP 3: EDA                   run_eda()
+      │
+      ▼
+ STEP 4: Feature Engineering   compute_biz_mcc_set() → build_features()
+      │
+      ▼
+ STEP 5: Model Training        prepare_train_test() → train_all_models()
+      │                        ├── train_logistic_regression()
+      │                        ├── train_random_forest()
+      │                        └── train_lgbm_optuna()
+      ▼
+ STEP 6: Evaluation            evaluate_models()
+      │
+      ▼
+ STEP 7: SHAP Analysis         run_shap()
+      │
+      ▼
+ STEP 8: Consumer Scoring      score_consumers()
+      │
+      ▼
+ STEP 9: Segment Profiling     segment_profiles()
+      │
+      ▼
+   reports/
+```
 
-Все фичи считаются на основе оконного периода 6 месяцев (данный период данных).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+---
 
-## Объём и интенсивность
+## Step-by-step
 
-* total_txn_count — общее количество транзакций.
-* total_txn_amount — суммарный оборот по карте.
-* avg_txn_amount, median_txn_amount — средний и медианный чек.
-* std_txn_amount — вариативность чека.
-* max_txn_amount — максимальная транзакция.
+### STEP 1 — Data Loading (`load_data`)
 
-Ожидание: у бизнес‑поведения больше транзакций и выше оборот, но средний чек может быть не всегда намного выше обычного потребителя.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+Loads three parquet files. Validates that all files exist before proceeding — exits with a clear message if a file is missing.
 
-## Структура по MCC и мерчантам
+Assigns labels:
+- `business_cards_MDQ.parquet` → `segment = 1`
+- `consumer_cards_MDQ.parquet` → `segment = 0`
 
-* top_mcc_k_share — доля транзакций в топ‑k бизнес‑MCC (выделить их по поведению business‑карт).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* mcc_entropy — энтропия распределения MCC (насколько разнообразны категории трат).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* unique_mcc_count — количество уникальных MCC.
-* unique_merchants_count — количество уникальных merchant_id.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* hhi_merchants — индекс Херфиндаля по merchant_id (меряет концентрацию оборота на нескольких мерчантах).
+---
 
-Гипотеза: у скрытого бизнеса выше число уникальных клиентов/мерчантов и иная структура MCC.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+### STEP 2 — Preprocessing (`preprocess`)
 
-## Регулярность и подписки
+- Concatenates business and consumer datasets
+- Downcasts `float64 → float32`, `int64 → int32` to reduce memory usage
+- Parses `transaction_date` and `transaction_timestamp`
+- Extracts `hour`, `weekday`, `month`, `week` from timestamps
+- Left-joins `merchants_reference` on `merchant_id` to add `merchant_country` and `recurring_capable`
 
-* recurring_txn_count, recurring_txn_share — число и доля транзакций с Is_recurring=1.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* recurring_capable_merchants_share — доля мерчантов из справочника с recurring_capable=1.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* month_activity_count — кол-во активных месяцев (в скольких месяцах были транзакции).
+---
 
-Скрытые предприниматели могут иметь регулярные платежи поставщикам сервисов (аренда, реклама, SaaS и т.п.).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+### STEP 3 — EDA (`run_eda`)
 
-## Тайм‑паттерны
+Generates `reports/eda_overview.png` with 6 panels:
 
-* weekday_vs_weekend_ratio — отношение транзакций в будни к выходным.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* night_txn_share — доля транзакций ночью (например, 00:00–06:00).
-* business_hours_txn_share — доля транзакций в «рабочие часы» (например, 9–18, по местному времени).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* hourly_entropy — энтропия распределения по часам: насколько «равномерно» растянуты операции по суткам.
+| Panel | What it shows |
+|-------|--------------|
+| A | Transactions per card distribution |
+| B | log(average transaction amount) |
+| C | Online vs POS channel split |
+| D | Top-15 MCC codes for business cards |
+| E | Transaction volume by hour of day |
+| F | Transaction volume by day of week |
 
-У бизнеса больше транзакций в будни и в бизнес‑часы, у обычных людей пик по вечерам и выходным.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+---
 
-## География и каналы
+### STEP 4 — Feature Engineering
 
-* online_txn_share — доля транзакций channel='online'.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* foreign_country_txn_share — доля транзакций за пределами страны клиента (по полю country).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* merchant_foreign_share — доля мерчантов из merchant_country ≠ страна клиента.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+#### `compute_biz_mcc_set()`
 
-Например, малый онлайн‑бизнес может интенсивно использовать зарубежные сервисы рекламы/обработки платежей.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+Identifies MCC codes that appear **3× more frequently** in business card transactions than in consumer card transactions. These codes form `BIZ_MCC_SET` — a data-driven signal used in feature construction.
 
-## Структура контрагентов (proxy для B2C)
+> **Note on data leakage:** `BIZ_MCC_SET` is computed at the population level (across all cards), not at the individual card level. This means no information from held-out test cards leaks into the feature itself. The set is used as a fixed reference dictionary, not derived from any card's individual label.
 
-Если есть признаки, позволяющие различать «входящие» и «исходящие» платежи, можно добавить:
+#### `build_features()`
 
-* incoming_txn_count, incoming_amount_share.
-* unique_incoming_counterparties — количество «платящих» клиентов, если это выводится из данных.
+Aggregates all transactions to card level. One row = one card.
 
-Даже без явного направления можно косвенно судить по MCC и типу мерчантов.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+| Feature | Description | Signal |
+|---------|-------------|--------|
+| `total_txn_count` | Total number of transactions | Activity volume |
+| `total_amount` | Total spend | Revenue proxy |
+| `avg_amount` | Mean transaction amount | Ticket size |
+| `median_amount` | Median transaction amount | Robust ticket size |
+| `std_amount` | Std of transaction amounts | Spend variability |
+| `amount_cv` | Coefficient of variation (std/mean) | Order irregularity |
+| `biz_hours_share` | Share of txns during 09–18 Mon–Fri | B2B activity timing |
+| `weekend_share` | Share of txns on weekends | Consumer vs business timing |
+| `night_share` | Share of txns between 22–06 | Consumer leisure signal |
+| `online_share` | Share of online channel txns | Business prefers online |
+| `foreign_merchant_share` | Share of txns at non-KZ merchants | Cross-border B2B |
+| `recurring_share` | Share of recurring transactions | SaaS / subscription signal |
+| `recurring_capable_share` | Share of merchants that support recurring | B2B merchant profile |
+| `unique_mcc` | Number of distinct MCC codes | Category diversity |
+| `biz_mcc_share` | Share of txns in business MCC codes | Direct B2B signal |
+| `unique_merchants` | Number of distinct merchants | Supplier diversity |
+| `active_months` | Months with at least one transaction | Activity span |
+| `mcc_entropy` | Shannon entropy of MCC distribution | Low = focused niche |
+| `hhi_merchants` | Herfindahl index of merchant distribution | High = concentrated |
+| `txn_per_month` | Transactions normalised by active months | Comparable activity rate |
+| `amount_per_month` | Amount normalised by active months | Comparable volume |
+| `merch_per_month` | Merchants normalised by active months | Supplier expansion rate |
 
-## Относительные фичи
+---
 
-* txns_per_month = total_txn_count / активные месяцы.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* avg_amount_per_month = total_txn_amount / активные месяцы.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* unique_merchants_per_month.
+### STEP 5 — Model Training (`train_all_models`)
 
-Это нормирует поведение по длительности истории в данных.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+**Train/test split:** 80/20 stratified by `segment`.
 
-## Конкретный технический пайплайн
+Three models trained and compared:
 
-## 1. Загрузка и объединение данных
+#### Logistic Regression (baseline)
+- `StandardScaler` + `LogisticRegression(C=0.1, class_weight='balanced')`
+- Purpose: linear baseline, fast, interpretable
 
-* Считать:
-  * business_cards.parquet → df_business.
-  * consumer_cards.parquet → df_consumer.
-  * merchants_reference.parquet → df_merchants.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Джоинить merchants_reference по merchant_id ко всем транзакциям.
+#### Random Forest (baseline)
+- `n_estimators=200`, `max_depth=10`, `class_weight='balanced'`
+- Purpose: non-linear baseline without hyperparameter tuning
 
-## 2. Разметка и объединённый датасет
+#### LightGBM + Optuna (final model)
+- Optuna runs **30 trials** of Bayesian hyperparameter search
+- Each trial evaluated with **3-fold stratified CV** on the training set
+- Parameters tuned: `n_estimators`, `num_leaves`, `max_depth`, `learning_rate`, `min_child_samples`, `subsample`, `colsample_bytree`, `reg_alpha`, `reg_lambda`
+- Best parameters are used to train the final model on the full training set
 
-* Добавить колонку segment:
-  * business → 1, consumer → 0.
-* Объединить df = concat([df_business, df_consumer]).
+---
 
-## 3. Агрегации до уровня карты
+### STEP 6 — Evaluation (`evaluate_models`)
 
-* Группировка: df_grouped = df.groupby('card_number').agg({...}).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* В агрегатах учитывать и сегмент (target = max(segment)).
+Metrics computed on the held-out test set:
 
-## 4. Препроцессинг
+| Metric | Description |
+|--------|-------------|
+| ROC-AUC | Overall discrimination ability |
+| PR-AUC (Avg Precision) | Performance under class imbalance |
+| F1 score | Harmonic mean of precision and recall |
+| Optimal threshold | Threshold that maximises F1 on test set |
+| Confusion Matrix | TP, TN, FP, FN counts at optimal threshold |
 
-* Обработка пропусков:
-  * Для числовых фич → median/0.
-  * Для категорий (если оставишь какие‑то) → 'missing'.
-* Нормализация/стандартизация для моделей типа LogisticRegression, KNN (StandardScaler).
+Output: `reports/model_evaluation.png`
 
-## 5. Обучение моделей
+---
 
-* Разбить на train/test по card_number (stratify по target).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Baseline: LogisticRegression (с регуляризацией) и RandomForestClassifier.
-* Затем LightGBM:
-  * Параметры: num_leaves, max_depth, learning_rate, n_estimators подбирать через RandomizedSearchCV или небольшую ручную сетку.
+### STEP 7 — SHAP Analysis (`run_shap`)
 
-## 6. Оценка
+Uses `shap.TreeExplainer` on the LightGBM model.
 
-* ROC‑AUC, PR‑AUC.
-* confusion_matrix на тесте (для выбранного порога).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Посчитать precision, recall, F1.
-* Для презентации нарисовать: ROC‑кривую, PR‑кривую, bar‑chart feature_importances_.
+- Sample: up to 2,000 test cards
+- Generates `shap_feature_importance.png` (bar chart — mean absolute SHAP)
+- Generates `shap_summary.png` (beeswarm — direction and magnitude per feature)
 
-## 7. Интерпретация и бизнес‑сегментация
+SHAP explains **why** a specific card received a high score, making the model auditable and explainable to business stakeholders.
 
-* SHAP summary plot, чтобы показать топ‑10 фич, влияющих на предсказание «бизнес‑поведения».[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Применить модель ко всем consumer‑картам, посчитать вероятность p_i.
-* Взять, скажем, топ‑5% карт по p_i — это кандидаты «скрытых предпринимателей».
+---
 
-Сделать несколько case‑study: показать анонимный профиль клиента (фичи + MCC‑распределение) и объяснить, почему модель считает его бизнес‑подобным.[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
+### STEP 8 — Consumer Scoring (`score_consumers`)
 
-## Что подчеркнуть в презентации
+All 80,000 consumer cards are scored with `predict_proba`.
 
-* Указать, что данные синтетические, но гипотезы опираются на реальные банковские практики (MCC, эквайринг, поведение SME).[](https://drive.google.com/drive/folders/1xHu7QzRpqvhf2T8KCd_ZGduPMRFpWzI_)
-* Сфокусироваться на бизнес‑выгоде:
-  * потенциал доп. дохода от конвертации X% клиентов в бизнес‑сегмент,
-  * приоритизация для продаж/маркетинга вместо массовых кампаний.
-* Отдельный слайд про explainability: как банку объяснять менеджерам и регуляторам, почему конкретного клиента система пометила как «бизнес‑подобного» (через фичи и SHAP).
+Output columns in `final_submission.csv`:
+
+| Column | Description |
+|--------|-------------|
+| `card_number` | Card identifier |
+| `p_business` | Probability of hidden business behaviour (0–1) |
+
+Top 50 cards are exported with full feature profile to `top_50_candidates_detailed.csv`.
+
+---
+
+### STEP 9 — Segment Profiling (`segment_profiles`)
+
+Cards are split into three groups using the optimal threshold:
+
+| Group | Condition |
+|-------|-----------|
+| Real Business | `segment == 1` (known business cards) |
+| Hidden Entrepreneur | consumer card with `p_business ≥ threshold` |
+| Regular Consumer | consumer card with `p_business < threshold` |
+
+Median feature values are compared across groups.
+Output: `reports/segment_profiles.png`
+
+---
+
+## Reproducibility
+
+- `RANDOM_STATE = 42` used in all stochastic components
+- All paths are relative to `solution.py` location — runs on any OS
+- All outputs are deterministic given the same input data and seed

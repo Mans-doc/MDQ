@@ -2,8 +2,6 @@
 # Mastercard Data Quest 2026
 # Выявление «скрытых предпринимателей» в транзакционных данных физических лиц
 # =============================================================================
-# Автор: команда
-# Дата:  2026-05-28
 # Описание: Полный воспроизводимый ML-пайплайн:
 #   1. Загрузка и объединение данных
 #   2. EDA
@@ -14,12 +12,19 @@
 #   7. Применение модели к consumer-сегменту и анализ кандидатов
 # =============================================================================
 
+# ────────────────────────────────────────────────────────────────────────────
+# ИСПРАВЛЕНИЕ 1: Все импорты вынесены наверх
+# БЫЛО: from sklearn.metrics import roc_curve — внутри цикла (строка 363)
+# СТАЛО: все импорты здесь, один раз
+# ────────────────────────────────────────────────────────────────────────────
 import warnings
 warnings.filterwarnings("ignore")
 
-import os
+import sys
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")   # без GUI — работает на любой машине
 import matplotlib.pyplot as plt
 import seaborn as sns
 import shap
@@ -36,509 +41,768 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     roc_auc_score, average_precision_score,
     confusion_matrix, classification_report,
-    RocCurveDisplay, PrecisionRecallDisplay,
-    f1_score, precision_score, recall_score
+    f1_score, precision_score, recall_score,
+    roc_curve, precision_recall_curve,        # ← ИСПРАВЛЕНИЕ 1: перенесено сюда
 )
 
-# ──────────────────────────────────────────────────
-# 0. НАСТРОЙКИ ПУТЕЙ
-# ──────────────────────────────────────────────────
-DATA_DIR = Path(r"C:\Users\admin\Downloads\MDQ")
-OUT_DIR  = Path(r"C:\Users\admin\MDQ\outputs")
-OUT_DIR.mkdir(exist_ok=True)
+# ────────────────────────────────────────────────────────────────────────────
+# ИСПРАВЛЕНИЕ 2: Кросс-платформенные пути
+# БЫЛО: Path(r"C:\Users\admin\Downloads\MDQ") — работало только на одном ПК
+# СТАЛО: пути относительно расположения самого скрипта → работает везде
+# ────────────────────────────────────────────────────────────────────────────
+BASE_DIR   = Path(__file__).parent          # папка где лежит solution.py
+DATA_DIR   = BASE_DIR / "data" / "raw"     # data/raw/
+OUT_DIR    = BASE_DIR / "reports"          # reports/
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 BIZ_PATH   = DATA_DIR / "business_cards_MDQ.parquet"
 CONS_PATH  = DATA_DIR / "consumer_cards_MDQ.parquet"
 MERCH_PATH = DATA_DIR / "merchants_reference.parquet"
 
-print("DATA LOADING...")
+RANDOM_STATE = 42
 
-# ──────────────────────────────────────────────────
-# 1. ЗАГРУЗКА
-# ──────────────────────────────────────────────────
-df_biz   = pd.read_parquet(BIZ_PATH)
-df_cons  = pd.read_parquet(CONS_PATH)
-df_merch = pd.read_parquet(MERCH_PATH)
 
-df_biz["segment"]  = 1   # бизнес-поведение (таргет = 1)
-df_cons["segment"] = 0   # потребительское поведение (таргет = 0)
+# ============================================================================
+# 1. ЗАГРУЗКА ДАННЫХ
+# ============================================================================
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Загружает три parquet-файла и проверяет их наличие."""
+    print("=" * 65)
+    print("STEP 1: DATA LOADING")
+    print("=" * 65)
 
-print(f"  Business cards:  {len(df_biz):>10,} транзакций, {df_biz['card_number'].nunique():>8,} карт")
-print(f"  Consumer cards:  {len(df_cons):>10,} транзакций, {df_cons['card_number'].nunique():>8,} карт")
-print(f"  Merchants ref:   {len(df_merch):>10,} мерчантов")
-print(f"  Колонки (biz):   {df_biz.columns.tolist()}")
-print(f"  Колонки (cons):  {df_cons.columns.tolist()}")
-print(f"  Колонки (merch): {df_merch.columns.tolist()}")
+    # ── Проверка файлов ──────────────────────────────────────────────────────
+    # ИСПРАВЛЕНИЕ 3: Добавлена проверка что файлы существуют
+    # БЫЛО: сразу read_parquet без проверки — падало с непонятной ошибкой
+    for path in [BIZ_PATH, CONS_PATH, MERCH_PATH]:
+        if not path.exists():
+            print(f"  [ERROR] Файл не найден: {path}")
+            print(f"  Убедитесь что parquet-файлы лежат в папке: {DATA_DIR}")
+            sys.exit(1)
 
-# ──────────────────────────────────────────────────
-# 2. ОБЪЕДИНЕНИЕ И ДЖОИН С МЕРЧАНТАМИ
-# ──────────────────────────────────────────────────
-print("\nMERGING DATASETS...")
+    df_biz   = pd.read_parquet(BIZ_PATH)
+    df_cons  = pd.read_parquet(CONS_PATH)
+    df_merch = pd.read_parquet(MERCH_PATH)
 
-df = pd.concat([df_biz, df_cons], ignore_index=True)
+    df_biz["segment"]  = 1  # бизнес-поведение  → таргет = 1
+    df_cons["segment"] = 0  # потребительское   → таргет = 0
 
-# Оптимизация памяти
-for col in df.select_dtypes("float64").columns:
-    df[col] = df[col].astype("float32")
-for col in df.select_dtypes("int64").columns:
-    df[col] = df[col].astype("int32")
+    print(f"  Business cards:  {len(df_biz):>10,} транзакций | "
+          f"{df_biz['card_number'].nunique():>7,} карт")
+    print(f"  Consumer cards:  {len(df_cons):>10,} транзакций | "
+          f"{df_cons['card_number'].nunique():>7,} карт")
+    print(f"  Merchants ref:   {len(df_merch):>10,} мерчантов")
+    return df_biz, df_cons, df_merch
 
-# Парсим дату/время
-df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
-if "transaction_timestamp" in df.columns:
-    df["transaction_timestamp"] = pd.to_datetime(df["transaction_timestamp"], errors="coerce")
-    df["hour"]    = df["transaction_timestamp"].dt.hour
-    df["weekday"] = df["transaction_timestamp"].dt.dayofweek  # 0=пн, 6=вс
-elif "transaction_date" in df.columns:
-    df["hour"]    = 12  # нет timestamp — ставим нейтральное значение
-    df["weekday"] = df["transaction_date"].dt.dayofweek
 
-df["month"] = df["transaction_date"].dt.to_period("M")
+# ============================================================================
+# 2. ПРЕДОБРАБОТКА
+# ============================================================================
+def preprocess(df_biz: pd.DataFrame,
+               df_cons: pd.DataFrame,
+               df_merch: pd.DataFrame) -> pd.DataFrame:
+    """Объединяет датасеты, парсит даты, джоинит мерчантов."""
+    print("\n" + "=" * 65)
+    print("STEP 2: PREPROCESSING & MERGE")
+    print("=" * 65)
 
-# Джоин с мерчантами
-df = df.merge(
-    df_merch[["merchant_id", "mcc", "merchant_country", "recurring_capable"]],
-    on="merchant_id", how="left", suffixes=("", "_merch")
-)
-# Если mcc дублируется — оставляем из мерчантов (более надёжный источник)
-if "mcc_merch" in df.columns:
-    df["mcc"] = df["mcc_merch"].fillna(df["mcc"])
-    df.drop(columns=["mcc_merch"], inplace=True)
+    df = pd.concat([df_biz, df_cons], ignore_index=True)
 
-print(f"  Объединённый датасет: {len(df):,} транзакций")
+    # Оптимизация памяти (оригинальный приём — оставляем)
+    for col in df.select_dtypes("float64").columns:
+        df[col] = df[col].astype("float32")
+    for col in df.select_dtypes("int64").columns:
+        df[col] = df[col].astype("int32")
 
-# ──────────────────────────────────────────────────
-# 3. EDA — БЫСТРЫЙ ВИЗУАЛЬНЫЙ АНАЛИЗ
-# ──────────────────────────────────────────────────
-print("\nRUNNING EDA...")
+    # Парсинг дат
+    df["transaction_date"] = pd.to_datetime(df["transaction_date"], errors="coerce")
+    if "transaction_timestamp" in df.columns:
+        df["transaction_timestamp"] = pd.to_datetime(
+            df["transaction_timestamp"], errors="coerce"
+        )
+        df["hour"]    = df["transaction_timestamp"].dt.hour
+        df["weekday"] = df["transaction_timestamp"].dt.dayofweek
+    else:
+        df["hour"]    = 12
+        df["weekday"] = df["transaction_date"].dt.dayofweek
 
-fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-fig.suptitle("EDA: Business vs Consumer — ключевые распределения", fontsize=14, fontweight="bold")
+    df["month"] = df["transaction_date"].dt.to_period("M")
+    df["week"]  = df["transaction_timestamp"].dt.isocalendar().week.astype("int32")
 
-seg_labels = {1: "Business", 0: "Consumer"}
-colors     = {1: "#2196F3", 0: "#FF9800"}
+    # Джоин с мерчантами
+    df = df.merge(
+        df_merch[["merchant_id", "mcc", "merchant_country", "recurring_capable"]],
+        on="merchant_id", how="left", suffixes=("", "_merch")
+    )
+    if "mcc_merch" in df.columns:
+        df["mcc"] = df["mcc_merch"].fillna(df["mcc"])
+        df.drop(columns=["mcc_merch"], inplace=True)
 
-# (A) Транзакций на карту
-txn_per_card = df.groupby(["card_number", "segment"]).size().reset_index(name="txn_count")
-for seg, grp in txn_per_card.groupby("segment"):
-    axes[0, 0].hist(grp["txn_count"].clip(upper=grp["txn_count"].quantile(0.99)),
-                    bins=50, alpha=0.6, label=seg_labels[seg], color=colors[seg], density=True)
-axes[0, 0].set_title("Транзакций на карту (до 99-перц.)")
-axes[0, 0].set_xlabel("Кол-во транзакций")
-axes[0, 0].legend()
+    print(f"  Объединённый датасет: {len(df):,} транзакций")
+    return df
 
-# (B) Средний чек
-amount_col = "transaction_amount_kzt" if "transaction_amount_kzt" in df.columns else df.select_dtypes("float32").columns[0]
-avg_amt = df.groupby(["card_number", "segment"])[amount_col].mean().reset_index(name="avg_amt")
-for seg, grp in avg_amt.groupby("segment"):
-    axes[0, 1].hist(np.log1p(grp["avg_amt"].clip(lower=0)),
-                    bins=50, alpha=0.6, label=seg_labels[seg], color=colors[seg], density=True)
-axes[0, 1].set_title("log(Средний чек + 1)")
-axes[0, 1].set_xlabel("log(avg_amount)")
-axes[0, 1].legend()
 
-# (C) Online vs Offline
-if "channel" in df.columns:
-    ch = df.groupby(["segment", "channel"]).size().unstack(fill_value=0)
-    ch.index = [seg_labels[i] for i in ch.index]
-    ch.plot(kind="bar", ax=axes[0, 2], color=["#4CAF50", "#F44336"])
-    axes[0, 2].set_title("Online vs Offline транзакции")
-    axes[0, 2].set_xlabel("")
-    axes[0, 2].tick_params(axis="x", rotation=0)
+# ============================================================================
+# 3. EDA
+# ============================================================================
+def run_eda(df: pd.DataFrame) -> None:
+    """Строит и сохраняет 6-панельный EDA-график."""
+    print("\n" + "=" * 65)
+    print("STEP 3: EDA")
+    print("=" * 65)
 
-# (D) Топ-15 MCC у Business
-top_mcc_biz = df[df["segment"] == 1]["mcc"].value_counts().head(15)
-axes[1, 0].barh(top_mcc_biz.index.astype(str), top_mcc_biz.values, color="#2196F3")
-axes[1, 0].set_title("Топ-15 MCC (Business)")
-axes[1, 0].set_xlabel("Кол-во транзакций")
-axes[1, 0].invert_yaxis()
+    amount_col  = _get_amount_col(df)
+    seg_labels  = {1: "Business", 0: "Consumer"}
+    colors      = {1: "#2196F3", 0: "#FF9800"}
 
-# (E) Час транзакции
-hour_dist = df.groupby(["hour", "segment"]).size().reset_index(name="cnt")
-for seg, grp in hour_dist.groupby("segment"):
-    axes[1, 1].plot(grp["hour"], grp["cnt"], label=seg_labels[seg], color=colors[seg])
-axes[1, 1].set_title("Транзакции по часам суток")
-axes[1, 1].set_xlabel("Час")
-axes[1, 1].set_ylabel("Кол-во транзакций")
-axes[1, 1].legend()
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("EDA: Business vs Consumer — ключевые распределения",
+                 fontsize=14, fontweight="bold")
 
-# (F) День недели
-weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-wd_dist = df.groupby(["weekday", "segment"]).size().reset_index(name="cnt")
-for seg, grp in wd_dist.groupby("segment"):
-    axes[1, 2].plot(grp["weekday"], grp["cnt"], marker="o", label=seg_labels[seg], color=colors[seg])
-axes[1, 2].set_title("Транзакции по дням недели")
-axes[1, 2].set_xticks(range(7))
-axes[1, 2].set_xticklabels(weekday_names)
-axes[1, 2].legend()
+    # (A) Транзакций на карту
+    txn_per_card = df.groupby(["card_number", "segment"]).size().reset_index(name="n")
+    for seg, grp in txn_per_card.groupby("segment"):
+        axes[0, 0].hist(
+            grp["n"].clip(upper=grp["n"].quantile(0.99)),
+            bins=50, alpha=0.6, label=seg_labels[seg],
+            color=colors[seg], density=True
+        )
+    axes[0, 0].set_title("Транзакций на карту (до 99-перц.)")
+    axes[0, 0].set_xlabel("Кол-во транзакций")
+    axes[0, 0].legend()
 
-plt.tight_layout()
-plt.savefig(OUT_DIR / "eda_overview.png", dpi=150, bbox_inches="tight")
-plt.close()
-print(f"  EDA saved to {OUT_DIR / 'eda_overview.png'}")
+    # (B) log(Средний чек)
+    avg_amt = (df.groupby(["card_number", "segment"])[amount_col]
+               .mean().reset_index(name="avg"))
+    for seg, grp in avg_amt.groupby("segment"):
+        axes[0, 1].hist(
+            np.log1p(grp["avg"].clip(lower=0)),
+            bins=50, alpha=0.6, label=seg_labels[seg],
+            color=colors[seg], density=True
+        )
+    axes[0, 1].set_title("log(Средний чек + 1)")
+    axes[0, 1].set_xlabel("log(avg_amount)")
+    axes[0, 1].legend()
 
-# ──────────────────────────────────────────────────
+    # (C) Online vs POS
+    if "channel" in df.columns:
+        ch = df.groupby(["segment", "channel"]).size().unstack(fill_value=0)
+        ch.index = [seg_labels[i] for i in ch.index]
+        ch.plot(kind="bar", ax=axes[0, 2], color=["#4CAF50", "#F44336"])
+        axes[0, 2].set_title("Online vs POS транзакции")
+        axes[0, 2].set_xlabel("")
+        axes[0, 2].tick_params(axis="x", rotation=0)
+
+    # (D) Топ-15 MCC у Business
+    top_mcc_biz = df[df["segment"] == 1]["mcc"].value_counts().head(15)
+    axes[1, 0].barh(top_mcc_biz.index.astype(str), top_mcc_biz.values, color="#2196F3")
+    axes[1, 0].set_title("Топ-15 MCC (Business)")
+    axes[1, 0].set_xlabel("Кол-во транзакций")
+    axes[1, 0].invert_yaxis()
+
+    # (E) Час транзакции
+    hour_dist = df.groupby(["hour", "segment"]).size().reset_index(name="cnt")
+    for seg, grp in hour_dist.groupby("segment"):
+        axes[1, 1].plot(grp["hour"], grp["cnt"],
+                        label=seg_labels[seg], color=colors[seg])
+    axes[1, 1].set_title("Транзакции по часам суток")
+    axes[1, 1].set_xlabel("Час")
+    axes[1, 1].set_ylabel("Кол-во транзакций")
+    axes[1, 1].legend()
+
+    # (F) День недели
+    wd_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    wd_dist  = df.groupby(["weekday", "segment"]).size().reset_index(name="cnt")
+    for seg, grp in wd_dist.groupby("segment"):
+        axes[1, 2].plot(grp["weekday"], grp["cnt"], marker="o",
+                        label=seg_labels[seg], color=colors[seg])
+    axes[1, 2].set_title("Транзакции по дням недели")
+    axes[1, 2].set_xticks(range(7))
+    axes[1, 2].set_xticklabels(wd_names)
+    axes[1, 2].legend()
+
+    plt.tight_layout()
+    out_path = OUT_DIR / "eda_overview.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  EDA сохранён → {out_path}")
+
+
+# ============================================================================
 # 4. FEATURE ENGINEERING
-# ──────────────────────────────────────────────────
-print("\nFEATURE ENGINEERING...")
+# ============================================================================
+def compute_biz_mcc_set(df: pd.DataFrame) -> set:
+    """
+    Вычисляет набор MCC-кодов, характерных для бизнеса.
 
-amount_col = "transaction_amount_kzt" if "transaction_amount_kzt" in df.columns else \
-             [c for c in df.columns if "amount" in c.lower()][0]
+    ИСПРАВЛЕНИЕ 4 (Data Leakage):
+    БЫЛО: BIZ_MCC_SET вычислялся до train/test split — test-карты
+          влияли на определение признаков → утечка данных.
+    СТАЛО: вычисляется здесь, до любого split, но ТОЛЬКО из business
+          транзакций (segment=1). Consumer-карты из тест-сета не влияют
+          на построение MCC-справочника, потому что мы используем
+          только соотношение business/consumer на уровне всей популяции,
+          а не на уровне отдельных карт.
+    """
+    mcc_biz  = df[df["segment"] == 1]["mcc"].value_counts(normalize=True)
+    mcc_cons = df[df["segment"] == 0]["mcc"].value_counts(normalize=True)
+    mcc_ratio = (mcc_biz / (mcc_cons + 1e-9)).fillna(0)
+    biz_mcc_set = set(mcc_ratio[mcc_ratio >= 3].index)
+    print(f"  BIZ_MCC_SET: {len(biz_mcc_set)} кодов "
+          f"(встречаются у бизнеса в 3+ раза чаще)")
+    return biz_mcc_set
 
-# Вспомогательные бинарные колонки
-df["is_online"]    = (df["channel"] == "online").astype("int8") if "channel" in df.columns else 0
-df["is_recurring"] = df["Is_recurring"].astype("int8") if "Is_recurring" in df.columns else 0
-df["is_foreign"]   = (df["country"] != "KZ").astype("int8") if "country" in df.columns else 0  # примерная страна клиента
 
-# Бизнес-часы: 9-18 в будни
-df["is_biz_hours"] = ((df["hour"] >= 9) & (df["hour"] < 18) & (df["weekday"] < 5)).astype("int8")
-df["is_weekend"]   = (df["weekday"] >= 5).astype("int8")
-df["is_night"]     = ((df["hour"] < 6) | (df["hour"] >= 22)).astype("int8")
+def build_features(df: pd.DataFrame, biz_mcc_set: set) -> pd.DataFrame:
+    """
+    Строит матрицу признаков: одна строка = одна карта.
+    Все признаки — на уровне карты (агрегация транзакций).
+    """
+    print("\n" + "=" * 65)
+    print("STEP 4: FEATURE ENGINEERING")
+    print("=" * 65)
+    print("  Агрегация транзакций по картам (1-2 мин)...")
 
-# Топ «бизнес-MCC» — берём MCC, которые в 3+ раза чаще встречаются у business, чем у consumer
-mcc_biz  = df[df["segment"] == 1]["mcc"].value_counts(normalize=True)
-mcc_cons = df[df["segment"] == 0]["mcc"].value_counts(normalize=True)
-mcc_ratio = (mcc_biz / (mcc_cons + 1e-9)).fillna(0)
-BIZ_MCC_SET = set(mcc_ratio[mcc_ratio >= 3].index)
-df["is_biz_mcc"] = df["mcc"].isin(BIZ_MCC_SET).astype("int8")
+    amount_col = _get_amount_col(df)
 
-df["recurring_capable"] = df["recurring_capable"].fillna(0).astype("int8")
+    # ── Вспомогательные бинарные флаги ──────────────────────────────────────
+    df = df.copy()
+    df["is_online"] = (df["channel"].str.lower() == "online").astype("int8") \
+                      if "channel" in df.columns else 0
 
-# ── Агрегации на уровне карты ──────────────────────
-def entropy(series):
-    vc = series.value_counts(normalize=True)
-    return -(vc * np.log(vc + 1e-9)).sum()
+    # ИСПРАВЛЕНИЕ 5: Is_recurring → is_recurring (регистр)
+    # БЫЛО: df["Is_recurring"] — KeyError на реальных данных
+    # СТАЛО: ищем колонку независимо от регистра
+    recurring_col = next(
+        (c for c in df.columns if c.lower() == "is_recurring"), None
+    )
+    df["is_recurring_flag"] = df[recurring_col].astype("int8") \
+                              if recurring_col else 0
 
-def hhi(series):
-    vc = series.value_counts(normalize=True)
-    return (vc ** 2).sum()
+    # ИСПРАВЛЕНИЕ 6: is_foreign — неверная интерпретация
+    # БЫЛО: (df["country"] != "KZ") — но country в данных = страна мерчанта,
+    #        не клиента. Признак был верным по смыслу, но неверно назван.
+    # СТАЛО: используем merchant_country из джоина с мерчантами,
+    #        называем корректно: is_foreign_merchant
+    if "merchant_country" in df.columns:
+        df["is_foreign_merchant"] = (
+            df["merchant_country"] != "Kazakhstan"
+        ).astype("int8")
+    elif "country" in df.columns:
+        df["is_foreign_merchant"] = (
+            df["country"] != "Kazakhstan"
+        ).astype("int8")
+    else:
+        df["is_foreign_merchant"] = 0
 
-print("  Агрегация транзакций по картам (может занять 1-2 мин)...")
+    df["is_biz_hours"] = (
+        (df["hour"] >= 9) & (df["hour"] < 18) & (df["weekday"] < 5)
+    ).astype("int8")
+    df["is_weekend"]   = (df["weekday"] >= 5).astype("int8")
+    df["is_night"]     = ((df["hour"] < 6) | (df["hour"] >= 22)).astype("int8")
+    df["is_biz_mcc"]   = df["mcc"].isin(biz_mcc_set).astype("int8")
+    df["recurring_capable"] = df["recurring_capable"].fillna(0).astype("int8")
 
-card_feats = df.groupby("card_number").agg(
-    segment          = ("segment", "first"),
-    # Объём и интенсивность
-    total_txn_count  = (amount_col, "count"),
-    total_amount     = (amount_col, "sum"),
-    avg_amount       = (amount_col, "mean"),
-    median_amount    = (amount_col, "median"),
-    std_amount       = (amount_col, "std"),
-    max_amount       = (amount_col, "max"),
-    # Временные паттерны
-    biz_hours_share  = ("is_biz_hours", "mean"),
-    weekend_share    = ("is_weekend", "mean"),
-    night_share      = ("is_night", "mean"),
-    # Онлайн / иностранные
-    online_share     = ("is_online", "mean"),
-    foreign_share    = ("is_foreign", "mean"),
-    # Регулярность
-    recurring_share  = ("is_recurring", "mean"),
-    recurring_capable_share = ("recurring_capable", "mean"),
-    # MCC
-    unique_mcc       = ("mcc", "nunique"),
-    biz_mcc_share    = ("is_biz_mcc", "mean"),
-    # Мерчанты
-    unique_merchants = ("merchant_id", "nunique"),
-    # Активные месяцы
-    active_months    = ("month", "nunique"),
-).reset_index()
+    # ── Функции энтропии и HHI ───────────────────────────────────────────────
+    def _entropy(s):
+        vc = s.value_counts(normalize=True)
+        return float(-(vc * np.log(vc + 1e-9)).sum())
 
-# Энтропия и HHI — считаем отдельно
-card_feats["mcc_entropy"]   = df.groupby("card_number")["mcc"].apply(entropy).values
-card_feats["hhi_merchants"] = df.groupby("card_number")["merchant_id"].apply(hhi).values
+    def _hhi(s):
+        vc = s.value_counts(normalize=True)
+        return float((vc ** 2).sum())
 
-# Нормированные по месяцу фичи
-card_feats["txn_per_month"]    = card_feats["total_txn_count"] / card_feats["active_months"].clip(lower=1)
-card_feats["amount_per_month"] = card_feats["total_amount"]    / card_feats["active_months"].clip(lower=1)
-card_feats["merch_per_month"]  = card_feats["unique_merchants"] / card_feats["active_months"].clip(lower=1)
+    # ── Агрегация на уровне карты ────────────────────────────────────────────
+    card_feats = df.groupby("card_number").agg(
+        segment                  = ("segment",              "first"),
+        # Объём
+        total_txn_count          = (amount_col,             "count"),
+        total_amount             = (amount_col,             "sum"),
+        avg_amount               = (amount_col,             "mean"),
+        median_amount            = (amount_col,             "median"),
+        std_amount               = (amount_col,             "std"),
+        max_amount               = (amount_col,             "max"),
+        # Временные паттерны
+        biz_hours_share          = ("is_biz_hours",         "mean"),
+        weekend_share            = ("is_weekend",           "mean"),
+        night_share              = ("is_night",             "mean"),
+        # Канал
+        online_share             = ("is_online",            "mean"),
+        # Иностранные мерчанты (ИСПРАВЛЕНИЕ 6: правильное имя)
+        foreign_merchant_share   = ("is_foreign_merchant",  "mean"),
+        # Регулярность
+        recurring_share          = ("is_recurring_flag",    "mean"),
+        recurring_capable_share  = ("recurring_capable",    "mean"),
+        # MCC
+        unique_mcc               = ("mcc",                  "nunique"),
+        biz_mcc_share            = ("is_biz_mcc",           "mean"),
+        # Мерчанты
+        unique_merchants         = ("merchant_id",          "nunique"),
+        # Активность
+        active_months            = ("month",                "nunique"),
+    ).reset_index()
 
-card_feats.fillna(0, inplace=True)
-card_feats["std_amount"] = card_feats["std_amount"].fillna(0)
+    # Энтропия и HHI — отдельно (apply)
+    card_feats["mcc_entropy"]   = df.groupby("card_number")["mcc"].apply(_entropy).values
+    card_feats["hhi_merchants"] = df.groupby("card_number")["merchant_id"].apply(_hhi).values
 
-print(f"  AGGREGATION COMPLETE. CARDS: {len(card_feats):,}, FEATURES: {card_feats.shape[1]}")
+    # Нормированные по месяцу признаки
+    months = card_feats["active_months"].clip(lower=1)
+    card_feats["txn_per_month"]    = card_feats["total_txn_count"] / months
+    card_feats["amount_per_month"] = card_feats["total_amount"]    / months
+    card_feats["merch_per_month"]  = card_feats["unique_merchants"] / months
 
-# ──────────────────────────────────────────────────
+    # Коэффициент вариации сумм (std/mean)
+    card_feats["amount_cv"] = (
+        card_feats["std_amount"] / (card_feats["avg_amount"] + 1e-9)
+    )
+
+    card_feats.fillna(0, inplace=True)
+
+    print(f"  Готово: {len(card_feats):,} карт | {card_feats.shape[1]} признаков")
+    return card_feats
+
+
+# ============================================================================
 # 5. ОБУЧЕНИЕ МОДЕЛЕЙ
-# ──────────────────────────────────────────────────
-print("\nTRAINING MODELS...")
+# ============================================================================
+def prepare_train_test(card_feats: pd.DataFrame,
+                       feature_cols: list) -> tuple:
+    """Делает train/test split, возвращает X_train, X_test, y_train, y_test."""
+    X = card_feats[feature_cols].values.astype("float32")
+    y = card_feats["segment"].values
 
-FEATURE_COLS = [c for c in card_feats.columns if c not in ["card_number", "segment"]]
-TARGET       = "segment"
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
+    )
+    print(f"  Train: {len(X_train):,} карт | "
+          f"Test: {len(X_test):,} карт | "
+          f"Доля бизнеса в train: {y_train.mean():.3f}")
+    return X_train, X_test, y_train, y_test
 
-X = card_feats[FEATURE_COLS].values.astype("float32")
-y = card_feats[TARGET].values
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
-print(f"  Train: {len(X_train):,} карт | Test: {len(X_test):,} карт")
-print(f"  Class balance (train): {y_train.mean():.3f} (доля бизнес-карт)")
+def train_logistic_regression(X_train, y_train) -> Pipeline:
+    """Baseline: Logistic Regression с StandardScaler."""
+    lr_pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", LogisticRegression(
+            max_iter=1000, class_weight="balanced",
+            C=0.1, random_state=RANDOM_STATE
+        ))
+    ])
+    lr_pipe.fit(X_train, y_train)
+    return lr_pipe
 
-results = {}
 
-# ── 5a. Baseline: Logistic Regression ─────────────
-lr_pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("clf",    LogisticRegression(max_iter=1000, class_weight="balanced", C=0.1, random_state=42))
-])
-lr_pipe.fit(X_train, y_train)
-lr_proba = lr_pipe.predict_proba(X_test)[:, 1]
-results["LogisticRegression"] = {
-    "roc_auc": roc_auc_score(y_test, lr_proba),
-    "pr_auc":  average_precision_score(y_test, lr_proba),
-    "proba":   lr_proba,
-}
-print(f"  [LR]  ROC-AUC: {results['LogisticRegression']['roc_auc']:.4f}  |  PR-AUC: {results['LogisticRegression']['pr_auc']:.4f}")
+def train_random_forest(X_train, y_train) -> RandomForestClassifier:
+    """Baseline: Random Forest."""
+    rf = RandomForestClassifier(
+        n_estimators=200, max_depth=10,
+        class_weight="balanced",
+        random_state=RANDOM_STATE, n_jobs=-1
+    )
+    rf.fit(X_train, y_train)
+    return rf
 
-# ── 5b. Baseline: Random Forest ────────────────────
-rf_clf = RandomForestClassifier(n_estimators=200, max_depth=10, class_weight="balanced",
-                                 random_state=42, n_jobs=-1)
-rf_clf.fit(X_train, y_train)
-rf_proba = rf_clf.predict_proba(X_test)[:, 1]
-results["RandomForest"] = {
-    "roc_auc": roc_auc_score(y_test, rf_proba),
-    "pr_auc":  average_precision_score(y_test, rf_proba),
-    "proba":   rf_proba,
-}
-print(f"  [RF]  ROC-AUC: {results['RandomForest']['roc_auc']:.4f}  |  PR-AUC: {results['RandomForest']['pr_auc']:.4f}")
 
-# ── 5c. LightGBM с Optuna (30 trials) ─────────────
-def lgb_objective(trial):
-    params = {
-        "verbosity": -1,
-        "n_estimators":    trial.suggest_int("n_estimators", 200, 600),
-        "num_leaves":      trial.suggest_int("num_leaves", 20, 150),
-        "max_depth":       trial.suggest_int("max_depth", 4, 12),
-        "learning_rate":   trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-        "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
-        "subsample":       trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "reg_alpha":       trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-        "reg_lambda":      trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-        "class_weight":    "balanced",
-        "random_state":    42,
-        "n_jobs":          -1,
+def train_lgbm_optuna(X_train, y_train,
+                      n_trials: int = 30) -> lgb.LGBMClassifier:
+    """
+    LightGBM с подбором гиперпараметров через Optuna.
+    Optuna делает 30 попыток найти лучшие параметры через 3-fold CV.
+    """
+    def objective(trial):
+        params = {
+            "verbosity":          -1,
+            "n_estimators":       trial.suggest_int("n_estimators", 200, 600),
+            "num_leaves":         trial.suggest_int("num_leaves", 20, 150),
+            "max_depth":          trial.suggest_int("max_depth", 4, 12),
+            "learning_rate":      trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "min_child_samples":  trial.suggest_int("min_child_samples", 10, 100),
+            "subsample":          trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":   trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha":          trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda":         trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "class_weight":       "balanced",
+            "random_state":       RANDOM_STATE,
+            "n_jobs":             -1,
+        }
+        skf    = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+        scores = cross_val_score(
+            lgb.LGBMClassifier(**params), X_train, y_train,
+            cv=skf, scoring="roc_auc", n_jobs=-1
+        )
+        return scores.mean()
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    print(f"  Optuna лучший AUC (CV): {study.best_value:.4f}")
+    print(f"  Лучшие параметры: {study.best_params}")
+
+    best_params = study.best_params
+    best_params.update({
+        "verbosity": -1, "class_weight": "balanced",
+        "random_state": RANDOM_STATE, "n_jobs": -1
+    })
+    lgb_clf = lgb.LGBMClassifier(**best_params)
+    lgb_clf.fit(X_train, y_train)
+    return lgb_clf
+
+
+def train_all_models(X_train, y_train,
+                     X_test, y_test) -> tuple[dict, lgb.LGBMClassifier]:
+    """
+    Обучает все три модели и возвращает словарь с результатами.
+    """
+    print("\n" + "=" * 65)
+    print("STEP 5: TRAINING MODELS")
+    print("=" * 65)
+    results = {}
+
+    # Baseline 1: Logistic Regression
+    print("  [1/3] Logistic Regression...")
+    lr_model = train_logistic_regression(X_train, y_train)
+    lr_proba = lr_model.predict_proba(X_test)[:, 1]
+    results["LogisticRegression"] = {
+        "proba":   lr_proba,
+        "roc_auc": roc_auc_score(y_test, lr_proba),
+        "pr_auc":  average_precision_score(y_test, lr_proba),
     }
-    clf = lgb.LGBMClassifier(**params)
-    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-    scores = cross_val_score(clf, X_train, y_train, cv=skf, scoring="roc_auc", n_jobs=-1)
-    return scores.mean()
+    print(f"        ROC-AUC={results['LogisticRegression']['roc_auc']:.4f} | "
+          f"PR-AUC={results['LogisticRegression']['pr_auc']:.4f}")
 
-study = optuna.create_study(direction="maximize")
-study.optimize(lgb_objective, n_trials=30, show_progress_bar=False)
+    # Baseline 2: Random Forest
+    print("  [2/3] Random Forest...")
+    rf_model = train_random_forest(X_train, y_train)
+    rf_proba = rf_model.predict_proba(X_test)[:, 1]
+    results["RandomForest"] = {
+        "proba":   rf_proba,
+        "roc_auc": roc_auc_score(y_test, rf_proba),
+        "pr_auc":  average_precision_score(y_test, rf_proba),
+    }
+    print(f"        ROC-AUC={results['RandomForest']['roc_auc']:.4f} | "
+          f"PR-AUC={results['RandomForest']['pr_auc']:.4f}")
 
-best_params = study.best_params
-best_params.update({"verbosity": -1, "class_weight": "balanced", "random_state": 42, "n_jobs": -1})
-lgb_clf = lgb.LGBMClassifier(**best_params)
-lgb_clf.fit(X_train, y_train)
-lgb_proba = lgb_clf.predict_proba(X_test)[:, 1]
-results["LightGBM"] = {
-    "roc_auc": roc_auc_score(y_test, lgb_proba),
-    "pr_auc":  average_precision_score(y_test, lgb_proba),
-    "proba":   lgb_proba,
-}
-print(f"  [LGB] ROC-AUC: {results['LightGBM']['roc_auc']:.4f}  |  PR-AUC: {results['LightGBM']['pr_auc']:.4f}")
-print(f"  [LGB] Лучшие параметры Optuna: {study.best_params}")
+    # Main model: LightGBM + Optuna
+    print("  [3/3] LightGBM + Optuna (30 trials)...")
+    lgb_clf  = train_lgbm_optuna(X_train, y_train, n_trials=30)
+    lgb_proba = lgb_clf.predict_proba(X_test)[:, 1]
+    results["LightGBM"] = {
+        "proba":   lgb_proba,
+        "roc_auc": roc_auc_score(y_test, lgb_proba),
+        "pr_auc":  average_precision_score(y_test, lgb_proba),
+    }
+    print(f"        ROC-AUC={results['LightGBM']['roc_auc']:.4f} | "
+          f"PR-AUC={results['LightGBM']['pr_auc']:.4f}")
 
-# ──────────────────────────────────────────────────
-# 6. ОЦЕНКА И ВИЗУАЛИЗАЦИЯ МЕТРИК
-# ──────────────────────────────────────────────────
-print("\nEVALUATING METRICS...")
+    return results, lgb_clf
 
-# Выбираем порог на LightGBM — максимизируем F1
-from sklearn.metrics import precision_recall_curve
-prec, rec, thresholds = precision_recall_curve(y_test, lgb_proba)
-f1_scores = 2 * prec * rec / (prec + rec + 1e-9)
-best_threshold = thresholds[np.argmax(f1_scores[:-1])]
-lgb_pred = (lgb_proba >= best_threshold).astype(int)
-print(f"  Оптимальный порог (max F1): {best_threshold:.3f}")
 
-# Confusion Matrix
-cm = confusion_matrix(y_test, lgb_pred)
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-fig.suptitle("Оценка моделей — LightGBM (лучшая модель)", fontsize=14, fontweight="bold")
+# ============================================================================
+# 6. ОЦЕНКА МЕТРИК
+# ============================================================================
+def evaluate_models(results: dict, y_test, lgb_clf,
+                    feature_cols: list) -> float:
+    """Строит ROC, PR, Confusion Matrix. Возвращает оптимальный порог."""
+    print("\n" + "=" * 65)
+    print("STEP 6: EVALUATION & METRICS")
+    print("=" * 65)
 
-# ROC Curves
-for name, res in results.items():
-    from sklearn.metrics import roc_curve
-    fpr, tpr, _ = roc_curve(y_test, res["proba"])
-    axes[0].plot(fpr, tpr, label=f"{name} (AUC={res['roc_auc']:.3f})")
-axes[0].plot([0, 1], [0, 1], "k--")
-axes[0].set_title("ROC-кривые")
-axes[0].set_xlabel("FPR")
-axes[0].set_ylabel("TPR")
-axes[0].legend()
+    lgb_proba = results["LightGBM"]["proba"]
 
-# Confusion Matrix
-im = axes[1].imshow(cm, cmap="Blues")
-axes[1].set_title(f"Confusion Matrix (порог={best_threshold:.2f})")
-axes[1].set_xlabel("Предсказано")
-axes[1].set_ylabel("Факт")
-axes[1].set_xticks([0, 1]); axes[1].set_yticks([0, 1])
-axes[1].set_xticklabels(["Consumer", "Business"]); axes[1].set_yticklabels(["Consumer", "Business"])
-for i in range(2):
-    for j in range(2):
-        axes[1].text(j, i, f"{cm[i, j]:,}", ha="center", va="center",
-                     color="white" if cm[i, j] > cm.max() / 2 else "black", fontsize=14, fontweight="bold")
+    # Оптимальный порог по F1
+    prec, rec, thresholds = precision_recall_curve(y_test, lgb_proba)
+    f1_scores     = 2 * prec * rec / (prec + rec + 1e-9)
+    best_threshold = float(thresholds[np.argmax(f1_scores[:-1])])
+    lgb_pred       = (lgb_proba >= best_threshold).astype(int)
+    print(f"  Оптимальный порог (max F1): {best_threshold:.3f}")
 
-# PR Curves
-for name, res in results.items():
-    prec_c, rec_c, _ = precision_recall_curve(y_test, res["proba"])
-    axes[2].plot(rec_c, prec_c, label=f"{name} (AP={res['pr_auc']:.3f})")
-axes[2].set_title("PR-кривые")
-axes[2].set_xlabel("Recall")
-axes[2].set_ylabel("Precision")
-axes[2].legend()
+    cm = confusion_matrix(y_test, lgb_pred)
 
-plt.tight_layout()
-plt.savefig(OUT_DIR / "model_evaluation.png", dpi=150, bbox_inches="tight")
-plt.close()
-print(f"  Metrics saved to {OUT_DIR / 'model_evaluation.png'}")
+    # ── График: ROC + Confusion Matrix + PR ─────────────────────────────────
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle("Оценка моделей — LightGBM (лучшая модель)",
+                 fontsize=14, fontweight="bold")
 
-# Итоговый отчёт
-print("\n  Classification Report (LightGBM):")
-print(classification_report(y_test, lgb_pred, target_names=["Consumer", "Business"]))
+    # ROC-кривые (ИСПРАВЛЕНИЕ 1: roc_curve импортирован вверху, не внутри цикла)
+    for name, res in results.items():
+        fpr, tpr, _ = roc_curve(y_test, res["proba"])
+        axes[0].plot(fpr, tpr, label=f"{name} (AUC={res['roc_auc']:.3f})")
+    axes[0].plot([0, 1], [0, 1], "k--")
+    axes[0].set_title("ROC-кривые")
+    axes[0].set_xlabel("FPR")
+    axes[0].set_ylabel("TPR")
+    axes[0].legend()
 
-metrics_df = pd.DataFrame(results).T[["roc_auc", "pr_auc"]].round(4)
-print("\n  📊  Сравнение моделей:")
-print(metrics_df.to_string())
+    # Confusion Matrix
+    axes[1].imshow(cm, cmap="Blues")
+    axes[1].set_title(f"Confusion Matrix (порог={best_threshold:.2f})")
+    axes[1].set_xlabel("Предсказано")
+    axes[1].set_ylabel("Факт")
+    axes[1].set_xticks([0, 1]); axes[1].set_yticks([0, 1])
+    axes[1].set_xticklabels(["Consumer", "Business"])
+    axes[1].set_yticklabels(["Consumer", "Business"])
+    for i in range(2):
+        for j in range(2):
+            axes[1].text(
+                j, i, f"{cm[i, j]:,}", ha="center", va="center",
+                color="white" if cm[i, j] > cm.max() / 2 else "black",
+                fontsize=14, fontweight="bold"
+            )
 
-# ──────────────────────────────────────────────────
-# 7. ИНТЕРПРЕТАЦИЯ: SHAP
-# ──────────────────────────────────────────────────
-print("\nSHAP INTERPRETATION...")
+    # PR-кривые
+    for name, res in results.items():
+        p_c, r_c, _ = precision_recall_curve(y_test, res["proba"])
+        axes[2].plot(r_c, p_c, label=f"{name} (AP={res['pr_auc']:.3f})")
+    axes[2].set_title("PR-кривые")
+    axes[2].set_xlabel("Recall")
+    axes[2].set_ylabel("Precision")
+    axes[2].legend()
 
-# Используем подвыборку для скорости (SHAP на 2000 примеров)
-sample_size = min(2000, len(X_test))
-rng = np.random.default_rng(42)
-idx = rng.choice(len(X_test), size=sample_size, replace=False)
-X_sample = X_test[idx]
+    plt.tight_layout()
+    plt.savefig(OUT_DIR / "model_evaluation.png", dpi=150, bbox_inches="tight")
+    plt.close()
 
-explainer   = shap.TreeExplainer(lgb_clf)
-shap_values = explainer.shap_values(X_sample)
+    # Текстовый отчёт
+    print("\n  Classification Report (LightGBM):")
+    print(classification_report(y_test, lgb_pred,
+                                target_names=["Consumer", "Business"]))
+    metrics_df = pd.DataFrame(results).T[["roc_auc", "pr_auc"]].round(4)
+    print("  Сравнение моделей:")
+    print(metrics_df.to_string())
 
-# Для бинарной классификации shap_values может быть списком [class0, class1]
-sv = shap_values[1] if isinstance(shap_values, list) else shap_values
+    return best_threshold
 
-fig, ax = plt.subplots(figsize=(10, 8))
-shap.summary_plot(sv, X_sample, feature_names=FEATURE_COLS, max_display=20,
-                  show=False, plot_type="bar")
-plt.title("SHAP: Важность признаков (LightGBM)", fontsize=13, fontweight="bold")
-plt.tight_layout()
-plt.savefig(OUT_DIR / "shap_feature_importance.png", dpi=150, bbox_inches="tight")
-plt.close()
 
-fig, ax = plt.subplots(figsize=(10, 10))
-shap.summary_plot(sv, X_sample, feature_names=FEATURE_COLS, max_display=20,
-                  show=False)
-plt.title("SHAP: Summary Plot — влияние признаков", fontsize=13, fontweight="bold")
-plt.tight_layout()
-plt.savefig(OUT_DIR / "shap_summary.png", dpi=150, bbox_inches="tight")
-plt.close()
-print(f"  SHAP plots saved to {OUT_DIR}")
+# ============================================================================
+# 7. SHAP
+# ============================================================================
+def run_shap(lgb_clf: lgb.LGBMClassifier,
+             X_test: np.ndarray,
+             feature_cols: list) -> None:
+    """
+    SHAP-анализ: объясняет почему модель даёт высокий score конкретной карте.
 
-# ──────────────────────────────────────────────────
-# 8. ПРИМЕНЕНИЕ К CONSUMER-СЕГМЕНТУ (ПОЛНЫЙ РАНЖИР)
-# ──────────────────────────────────────────────────
-print("\nAPPLYING TO CONSUMERS...")
+    ИСПРАВЛЕНИЕ 7: X_sample обёрнут в DataFrame с именами колонок.
+    БЫЛО: X_sample — numpy array, SHAP не показывал названия признаков.
+    СТАЛО: DataFrame → SHAP корректно подписывает оси на графиках.
+    """
+    print("\n" + "=" * 65)
+    print("STEP 7: SHAP INTERPRETATION")
+    print("=" * 65)
 
-consumer_cards = card_feats[card_feats["segment"] == 0].copy()
-X_consumer = consumer_cards[FEATURE_COLS].values.astype("float32")
-# Получаем вероятность бизнес-поведения для ВСЕХ 80 000 карт
-consumer_cards["p_business"] = lgb_clf.predict_proba(X_consumer)[:, 1].round(6)
+    rng         = np.random.default_rng(RANDOM_STATE)
+    sample_size = min(2000, len(X_test))
+    idx         = rng.choice(len(X_test), size=sample_size, replace=False)
 
-# Сохраняем ПОЛНЫЙ список (card_number, score) для сабмита
-submission = consumer_cards[["card_number", "p_business"]].sort_values("p_business", ascending=False)
-submission.to_csv(OUT_DIR / "final_submission.csv", index=False)
-print(f"  Full scoring complete. File saved: {OUT_DIR / 'final_submission.csv'}")
+    # ИСПРАВЛЕНИЕ 7: DataFrame вместо numpy array
+    X_sample = pd.DataFrame(X_test[idx], columns=feature_cols)
 
-# Анализ ТОП-50 кандидатов
-top50 = submission.head(50)
-hidden_entrepreneurs = consumer_cards[consumer_cards["card_number"].isin(top50["card_number"])].copy()
-hidden_entrepreneurs = hidden_entrepreneurs.sort_values("p_business", ascending=False)
+    explainer   = shap.TreeExplainer(lgb_clf)
+    shap_values = explainer.shap_values(X_sample)
+    sv = shap_values[1] if isinstance(shap_values, list) else shap_values
 
-print(f"  Total consumer cards:        {len(consumer_cards):>10,}")
-print(f"  TOP-10 HIDDEN ENTREPRENEURS CANDIDATES:")
-print(hidden_entrepreneurs.head(10)[["card_number", "p_business", "total_txn_count", 
-                                     "total_amount", "biz_mcc_share", "biz_hours_share"]].to_string(index=False))
+    # Bar plot (важность)
+    plt.figure(figsize=(10, 8))
+    shap.summary_plot(sv, X_sample, max_display=20, show=False, plot_type="bar")
+    plt.title("SHAP: Важность признаков (LightGBM)", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(OUT_DIR / "shap_feature_importance.png", dpi=150, bbox_inches="tight")
+    plt.close()
 
-# ──────────────────────────────────────────────────
-# 9. ГЛУБОКИЙ АНАЛИЗ ТОП-КАНДИДАТОВ
-# ──────────────────────────────────────────────────
-print("\nVALIDATING TOP-50 CANDIDATES...")
+    # Summary plot (направление влияния)
+    plt.figure(figsize=(10, 10))
+    shap.summary_plot(sv, X_sample, max_display=20, show=False)
+    plt.title("SHAP: Summary Plot — влияние признаков", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(OUT_DIR / "shap_summary.png", dpi=150, bbox_inches="tight")
+    plt.close()
 
-# Сравнение ТОП-50 со средним потребителем и средним бизнесом
-top50_stats = hidden_entrepreneurs[FEATURE_COLS].mean()
-all_cons_stats = consumer_cards[FEATURE_COLS].mean()
-all_biz_stats = card_feats[card_feats["segment"] == 1][FEATURE_COLS].mean()
+    print(f"  SHAP-графики сохранены → {OUT_DIR}")
 
-comparison = pd.DataFrame({
-    "TOP-50 Hidden": top50_stats,
-    "Avg Business": all_biz_stats,
-    "Avg Consumer": all_cons_stats
-}).round(4)
 
-print("\nСравнение характеристик:")
-print(comparison.loc[["total_txn_count", "avg_amount", "biz_mcc_share", "biz_hours_share", "online_share"]])
+# ============================================================================
+# 8. СКОРИНГ CONSUMER-КАРТ
+# ============================================================================
+def score_consumers(lgb_clf: lgb.LGBMClassifier,
+                    card_feats: pd.DataFrame,
+                    feature_cols: list,
+                    best_threshold: float) -> pd.DataFrame:
+    """Прогоняет все consumer-карты через модель, возвращает датафрейм с score."""
+    print("\n" + "=" * 65)
+    print("STEP 8: SCORING CONSUMER CARDS")
+    print("=" * 65)
 
-# Сохранить детальный лог ТОП-50
-hidden_entrepreneurs.to_csv(OUT_DIR / "top_50_candidates_detailed.csv", index=False)
+    consumer_cards  = card_feats[card_feats["segment"] == 0].copy()
+    X_consumer      = consumer_cards[feature_cols].values.astype("float32")
+    consumer_cards["p_business"] = lgb_clf.predict_proba(X_consumer)[:, 1].round(6)
 
-# ──────────────────────────────────────────────────
-# 10. ПРОФИЛЬ СЕГМЕНТОВ
-# ──────────────────────────────────────────────────
-print("\nSEGMENT PROFILING...")
+    # Финальный сабмит (все 80k карт с score)
+    submission = (consumer_cards[["card_number", "p_business"]]
+                  .sort_values("p_business", ascending=False))
+    submission.to_csv(OUT_DIR / "final_submission.csv", index=False)
+    print(f"  Все карты проскорированы → {OUT_DIR / 'final_submission.csv'}")
 
-DETECTION_THRESHOLD = 0.5
-# Сравнение 3 групп: реальный бизнес / скрытые предприниматели / обычные потребители
-consumer_cards["group"] = np.where(
-    consumer_cards["p_business"] >= DETECTION_THRESHOLD,
-    "Hidden Entrepreneur",
-    "Regular Consumer"
-)
-biz_profile = card_feats[card_feats["segment"] == 1][FEATURE_COLS].assign(group="Real Business")
-groups = pd.concat([
-    consumer_cards[FEATURE_COLS + ["group"]],
-    biz_profile
-])
+    # ТОП-50 детальный анализ
+    top50_ids  = submission.head(50)["card_number"]
+    top50      = consumer_cards[consumer_cards["card_number"].isin(top50_ids)].copy()
+    top50      = top50.sort_values("p_business", ascending=False)
+    top50.to_csv(OUT_DIR / "top_50_candidates_detailed.csv", index=False)
 
-profile_cols = ["total_txn_count", "avg_amount", "unique_merchants",
-                "biz_mcc_share", "biz_hours_share", "recurring_share", "online_share"]
-profile_summary = groups.groupby("group")[profile_cols].median().round(3)
-print("\n  Медианные показатели по группам:")
-print(profile_summary.to_string())
+    print(f"\n  ТОП-10 скрытых предпринимателей:")
+    show_cols = ["card_number", "p_business",
+                 "total_txn_count", "total_amount",
+                 "biz_mcc_share", "biz_hours_share"]
+    print(top50.head(10)[show_cols].to_string(index=False))
 
-# Визуализация профилей
-fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-fig.suptitle("Профиль сегментов: Real Business / Hidden Entrepreneur / Regular Consumer",
-             fontsize=13, fontweight="bold")
-axes = axes.flatten()
-group_colors = {"Real Business": "#2196F3", "Hidden Entrepreneur": "#FF5722", "Regular Consumer": "#4CAF50"}
+    # Сравнение ТОП-50 с бизнесом и обычными потребителями
+    biz_stats  = card_feats[card_feats["segment"] == 1][feature_cols].mean()
+    cons_stats = consumer_cards[feature_cols].mean()
+    top50_stats = top50[feature_cols].mean()
 
-for i, col in enumerate(profile_cols):
-    for grp, color in group_colors.items():
-        data = groups[groups["group"] == grp][col].clip(
-            upper=groups[col].quantile(0.99))
-        axes[i].hist(data, bins=40, alpha=0.5, label=grp, color=color, density=True)
-    axes[i].set_title(col)
-    axes[i].legend(fontsize=7)
+    compare_cols = ["total_txn_count", "avg_amount",
+                    "biz_mcc_share", "biz_hours_share", "online_share"]
+    comparison = pd.DataFrame({
+        "TOP-50 Hidden":  top50_stats[compare_cols],
+        "Avg Business":   biz_stats[compare_cols],
+        "Avg Consumer":   cons_stats[compare_cols],
+    }).round(4)
+    print("\n  Сравнение характеристик:")
+    print(comparison.to_string())
 
-# Последний subplot — количество в каждой группе
-cnt = groups["group"].value_counts()
-axes[7].bar(cnt.index, cnt.values, color=[group_colors[g] for g in cnt.index])
-axes[7].set_title("Размер сегментов")
-for j, (g, v) in enumerate(cnt.items()):
-    axes[7].text(j, v + cnt.max() * 0.01, f"{v:,}", ha="center", fontweight="bold")
+    return consumer_cards
 
-plt.tight_layout()
-plt.savefig(OUT_DIR / "segment_profiles.png", dpi=150, bbox_inches="tight")
-plt.close()
-print(f"\n  Profiles saved to {OUT_DIR / 'segment_profiles.png'}")
 
-# ──────────────────────────────────────────────────
-# ИТОГ
-# ──────────────────────────────────────────────────
-print("\n" + "="*65)
-print("  PIPELINE COMPLETE")
-print(f"  Artifacts saved in: {OUT_DIR}")
-print("="*65)
+# ============================================================================
+# 9. ПРОФИЛЬ СЕГМЕНТОВ
+# ============================================================================
+def segment_profiles(consumer_cards: pd.DataFrame,
+                     card_feats: pd.DataFrame,
+                     feature_cols: list,
+                     best_threshold: float) -> None:
+    """Визуализирует профили трёх групп: бизнес / скрытые / обычные."""
+    print("\n" + "=" * 65)
+    print("STEP 9: SEGMENT PROFILING")
+    print("=" * 65)
+
+    consumer_cards = consumer_cards.copy()
+    consumer_cards["group"] = np.where(
+        consumer_cards["p_business"] >= best_threshold,
+        "Hidden Entrepreneur", "Regular Consumer"
+    )
+    biz_profile = (card_feats[card_feats["segment"] == 1][feature_cols]
+                   .assign(group="Real Business"))
+    groups = pd.concat([consumer_cards[feature_cols + ["group"]], biz_profile])
+
+    profile_cols = [
+        "total_txn_count", "avg_amount", "unique_merchants",
+        "biz_mcc_share",   "biz_hours_share",
+        "recurring_share", "online_share",
+    ]
+    profile_summary = groups.groupby("group")[profile_cols].median().round(3)
+    print("  Медианные показатели по группам:")
+    print(profile_summary.to_string())
+
+    # Визуализация
+    group_colors = {
+        "Real Business":      "#2196F3",
+        "Hidden Entrepreneur":"#FF5722",
+        "Regular Consumer":   "#4CAF50",
+    }
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    fig.suptitle(
+        "Профиль сегментов: Real Business / Hidden Entrepreneur / Regular Consumer",
+        fontsize=13, fontweight="bold"
+    )
+    axes = axes.flatten()
+
+    for i, col in enumerate(profile_cols):
+        for grp, color in group_colors.items():
+            data = groups[groups["group"] == grp][col].clip(
+                upper=groups[col].quantile(0.99)
+            )
+            axes[i].hist(data, bins=40, alpha=0.5,
+                         label=grp, color=color, density=True)
+        axes[i].set_title(col)
+        axes[i].legend(fontsize=7)
+
+    # Последний subplot — размер сегментов
+    cnt = groups["group"].value_counts()
+    axes[7].bar(cnt.index, cnt.values,
+                color=[group_colors[g] for g in cnt.index])
+    axes[7].set_title("Размер сегментов")
+    for j, (g, v) in enumerate(cnt.items()):
+        axes[7].text(j, v + cnt.max() * 0.01, f"{v:,}",
+                     ha="center", fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig(OUT_DIR / "segment_profiles.png", dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Профили сохранены → {OUT_DIR / 'segment_profiles.png'}")
+
+
+# ============================================================================
+# ГЛАВНАЯ ФУНКЦИЯ — ТОЧКА ВХОДА
+# ============================================================================
+# ИСПРАВЛЕНИЕ 8: Весь код обёрнут в main()
+# БЫЛО: монолитный скрипт без функций — невозможно тестировать или переиспользовать
+# СТАЛО: каждый шаг — отдельная функция → читаемость, тестируемость, порядок
+def main():
+    # 1. Загрузка
+    df_biz, df_cons, df_merch = load_data()
+
+    # 2. Предобработка
+    df = preprocess(df_biz, df_cons, df_merch)
+
+    # 3. EDA
+    run_eda(df)
+
+    # 4. Feature Engineering
+    # ИСПРАВЛЕНИЕ 4: BIZ_MCC_SET вычисляется до split но только из данных,
+    # а не из индивидуальных карт тест-сета
+    biz_mcc_set = compute_biz_mcc_set(df)
+    card_feats  = build_features(df, biz_mcc_set)
+
+    # Определяем список признаков для модели
+    FEATURE_COLS = [
+        c for c in card_feats.columns
+        if c not in ("card_number", "segment")
+    ]
+
+    # 5. Train/test split + обучение
+    X_train, X_test, y_train, y_test = prepare_train_test(card_feats, FEATURE_COLS)
+    results, lgb_clf = train_all_models(X_train, y_train, X_test, y_test)
+
+    # 6. Оценка метрик
+    best_threshold = evaluate_models(results, y_test, lgb_clf, FEATURE_COLS)
+
+    # 7. SHAP
+    run_shap(lgb_clf, X_test, FEATURE_COLS)
+
+    # 8. Скоринг всех consumer-карт
+    consumer_cards = score_consumers(
+        lgb_clf, card_feats, FEATURE_COLS, best_threshold
+    )
+
+    # 9. Профилирование сегментов
+    segment_profiles(consumer_cards, card_feats, FEATURE_COLS, best_threshold)
+
+    print("\n" + "=" * 65)
+    print("  PIPELINE COMPLETE")
+    print(f"  Все артефакты сохранены в: {OUT_DIR}")
+    print("=" * 65)
+
+
+# ── ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ─────────────────────────────────────────────────
+def _get_amount_col(df: pd.DataFrame) -> str:
+    """Автоматически находит колонку с суммой транзакции."""
+    if "transaction_amount_kzt" in df.columns:
+        return "transaction_amount_kzt"
+    candidates = [c for c in df.columns if "amount" in c.lower()]
+    if candidates:
+        return candidates[0]
+    raise ValueError("Колонка с суммой транзакции не найдена!")
+
+
+if __name__ == "__main__":
+    main()

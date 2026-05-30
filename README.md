@@ -1,46 +1,104 @@
-# Mastercard Data Quest: Hidden Entrepreneur Detection
+# MDQ — Mastercard Data Quest 2026
 
-This project aims to identify "hidden entrepreneurs" — consumers who use personal bank cards for business activities — using synthetic Mastercard transaction data.
+**Task:** Identify hidden entrepreneurs — consumer cardholders who exhibit business-like transaction behaviour — using ML on MasterCard transaction data.
 
-## Project Overview
-Detecting hidden business activity is crucial for banks to optimize products, manage risks, and offer tailored business services. This solution uses a machine learning pipeline to rank 80,000 consumer cards based on their "business-likeness" compared to a reference set of 25,000 verified business cards.
+---
 
-## Key Features
-- **Data Harmonization**: Processes 12M+ transactions across business and consumer segments.
-- **Advanced Feature Engineering**: 
-    - **MCC Analysis**: Concentration in B2B/Business-heavy categories.
-    - **Intensity**: Transaction frequency and volume patterns.
-    - **Time-of-Day**: Activity during business hours vs. leisure time.
-    - **Channel/Geography**: Online vs. offline and domestic vs. foreign transaction ratios.
-- **Explainable AI**: SHAP-based interpretation of model decisions.
-- **Ranking System**: Outputs a continuous score for all consumer cards to support targeted marketing or audit campaigns.
+## Problem Statement
 
-## Results
-- **Model Performance**: Achieved **0.999+ AUC-ROC** on the reference train/test split.
-- **Segment Profile**: The top-ranked "hidden entrepreneurs" exhibit profiles nearly identical to verified businesses:
-    - **Average Transaction Amount**: ~232k KZT (Top-50 candidates) vs ~167k KZT (Verified Business).
-    - **Business MCC Share**: ~65% (Top-50 candidates) vs ~72% (Verified Business).
+A segment of small business owners and self-employed individuals uses personal consumer cards for commercial activity. These clients generate business-level transaction volumes but are undetected by the bank, resulting in missed revenue from business card products, POS acquiring, and SME lending.
+
+Our model detects these "hidden entrepreneurs" from transaction patterns alone — no manual review required.
+
+---
 
 ## Project Structure
-- `solution.py`: The complete end-to-end ML pipeline (Data loading, EDA, Training, Scoring).
-- `requirements.txt`: Python dependencies.
-- `outputs/`: 
-    - `final_submission.csv`: Full ranking of 80,000 cards.
-    - `top_50_candidates_detailed.csv`: Detailed audit of the most suspicious cards.
-    - `*.png`: Visualizations of metrics, profiles, and feature importance.
 
-## Installation and Usage
+```
+MDQ/
+├── data/
+│   └── raw/
+│       ├── business_cards_MDQ.parquet    # 25,000 cards · 3M transactions
+│       ├── consumer_cards_MDQ.parquet    # 80,000 cards · 10M transactions
+│       └── merchants_reference.parquet  # 2,165 merchants with MCC codes
+├── reports/                             # All output files (auto-generated)
+│   ├── eda_overview.png
+│   ├── model_evaluation.png
+│   ├── shap_feature_importance.png
+│   ├── shap_summary.png
+│   ├── segment_profiles.png
+│   ├── final_submission.csv
+│   └── top_50_candidates_detailed.csv
+├── solution.py                          # Full ML pipeline
+├── requirements.txt
+├── Pipeline.md
+└── README.md
+```
 
-1. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+---
 
-2. **Run the pipeline**:
-   The script assumes data is located in `C:\Users\admin\Downloads\MDQ`.
-   ```bash
-   python solution.py
-   ```
+## Quickstart
 
-## Methodology
-The solution treats the problem as a classification task where known Business cards are the Positive class and a representative sample of Consumer cards is used as the Negative class proxy (One-Class/PU Learning approach). The LightGBM model is tuned specifically for the high imbalance and perfectly separable nature of the synthetic dataset.
+### 1. Clone the repo
+```bash
+git clone https://github.com/Mans-doc/MDQ.git
+cd MDQ
+```
+
+### 2. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Add datasets
+Place the three `.parquet` files into `data/raw/`:
+```
+data/raw/business_cards_MDQ.parquet
+data/raw/consumer_cards_MDQ.parquet
+data/raw/merchants_reference.parquet
+```
+
+### 4. Run the pipeline
+```bash
+python solution.py
+```
+
+All outputs are saved to `reports/`.
+
+---
+
+## Approach
+
+| Step | Description |
+|------|-------------|
+| EDA | Distribution analysis across business vs consumer segments |
+| Feature Engineering | 20+ behavioral features per card: MCC entropy, HHI concentration, business-hours ratio, channel mix, recurring patterns |
+| Modelling | Logistic Regression (baseline) → Random Forest (baseline) → **LightGBM + Optuna** (final) |
+| Evaluation | ROC-AUC, PR-AUC, F1 at optimal threshold, Confusion Matrix |
+| Explainability | SHAP feature importance and summary plots |
+| Output | Scored and ranked list of all 80,000 consumer cards |
+
+---
+
+## Key Features
+
+- **MCC Entropy** — diversity of spending categories per card
+- **HHI (Herfindahl Index)** — concentration in top merchant categories
+- **Business-hours ratio** — share of transactions during 09:00–18:00 on weekdays
+- **Recurring + tokenized patterns** — SaaS and B2B subscription signals
+- **Foreign merchant share** — cross-border B2B payment indicator
+- **Amount CV** — coefficient of variation in transaction amounts (order irregularity signal)
+
+---
+
+## Output
+
+`reports/final_submission.csv` — all 80,000 consumer cards ranked by `p_business` score (0–1).
+
+`reports/top_50_candidates_detailed.csv` — top 50 hidden entrepreneur profiles with full feature breakdown.
+
+---
+
+## Team
+
+Mastercard Data Quest 2026 — AIESEC Kazakhstan
